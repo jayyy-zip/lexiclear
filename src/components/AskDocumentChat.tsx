@@ -69,6 +69,7 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
 
     try {
       const response = await answerDocumentQuestion({
+        documentId: (document as any).documentId || document.metadata.id,
         rawText: document.metadata.rawText || document.summary,
         question: trimmed,
         documentType: document.documentType,
@@ -85,6 +86,7 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
         evidenceSnippet: response.evidenceSnippet,
         evidenceStrength: response.evidenceStrength,
         isNotFound: response.isNotFound,
+        sourceLocation: response.sourceLocation,
       };
 
       addChatMessage(aiMsg);
@@ -126,7 +128,7 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
 
         <div className="hidden sm:flex items-center space-x-2 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
           <ShieldCheck className="w-3.5 h-3.5" />
-          <span>Zero Hallucination Protocol</span>
+          <span>Evidence-Grounded Verification</span>
         </div>
       </div>
 
@@ -181,11 +183,11 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
                 >
                   <p className="whitespace-pre-wrap">{msg.text}</p>
 
-                  {/* Zero Hallucination Badge when information is absent */}
+                  {/* Grounding Verification Badge when information is absent */}
                   {!isUser && msg.isNotFound && (
                     <div className="mt-2.5 pt-2.5 border-t border-amber-200/80 flex items-center space-x-1.5 text-[11px] font-semibold text-amber-800">
                       <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
-                      <span>Zero Hallucination Protocol: Information absent from uploaded contract text</span>
+                      <span>Evidence Verification: Information absent from uploaded contract text</span>
                     </div>
                   )}
 
@@ -202,6 +204,11 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
                         {msg.pageReference && (
                           <span className="font-mono text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-200">
                             {msg.pageReference}
+                          </span>
+                        )}
+                        {msg.sourceLocation && (
+                          <span className="font-mono text-[10px] text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                            Offset: {msg.sourceLocation.startOffset ?? 0}–{msg.sourceLocation.endOffset ?? 0}
                           </span>
                         )}
                         {msg.evidenceStrength && (

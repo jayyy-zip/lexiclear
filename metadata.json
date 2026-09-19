@@ -1,6 +1,6 @@
 {
   "name": "LexiClear",
-  "description": "A GenAI legal document co-pilot that helps people understand legal documents, identify clauses that deserve attention, ask questions grounded in their document, and prepare practical next steps.",
+  "description": "Your AI Legal Document Assistant. Get instant summaries, key clause highlights, smart Q&A, and practical next steps.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

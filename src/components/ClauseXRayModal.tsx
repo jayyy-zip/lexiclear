@@ -149,13 +149,13 @@ export const ClauseXRayModal: React.FC<ClauseXRayModalProps> = ({
 
         {/* Section 5: Grounding Citation & Evidence Confidence */}
         <div className="pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex items-center space-x-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-slate-500">Citation:</span>
             <span className="font-mono font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded">
               {citation}
             </span>
             <span className="text-slate-300">•</span>
-            <span className="text-slate-500">Evidence / Confidence:</span>
+            <span className="text-slate-500">Evidence:</span>
             <span
               className={`font-semibold px-2 py-0.5 rounded-full border ${getStrengthBadge(
                 evidenceStrength
@@ -163,6 +163,14 @@ export const ClauseXRayModal: React.FC<ClauseXRayModalProps> = ({
             >
               {evidenceStrength}
             </span>
+            {risk?.sourceLocation?.startOffset !== undefined && (
+              <>
+                <span className="text-slate-300">•</span>
+                <span className="font-mono text-[10px] text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                  Offsets: {risk.sourceLocation.startOffset}–{risk.sourceLocation.endOffset}
+                </span>
+              </>
+            )}
           </div>
 
           {onAskAboutClause && (

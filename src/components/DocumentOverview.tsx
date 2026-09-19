@@ -39,8 +39,20 @@ export const DocumentOverview: React.FC<DocumentOverviewProps> = ({
               </span>
               <span className="text-slate-300">•</span>
               <span className="text-xs text-slate-500 font-mono">
-                {document.metadata.pageCount} pages • {document.metadata.wordCount} words
+                {document.metadata.pageCount && document.metadata.pageCount !== 'Page not available'
+                  ? `${document.metadata.pageCount} pages • `
+                  : ''}
+                {document.metadata.wordCount} words
               </span>
+              {document.coverage && (
+                <>
+                  <span className="text-slate-300">•</span>
+                  <span className="text-[11px] font-semibold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-200">
+                    Analyzed {document.coverage.sectionsAnalyzed} of {document.coverage.sectionsTotal} sections
+                    {document.coverage.coverageComplete ? ' (Full document)' : ''}
+                  </span>
+                </>
+              )}
             </div>
 
             <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 font-sans tracking-tight">

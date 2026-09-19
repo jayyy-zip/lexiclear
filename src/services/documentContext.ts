@@ -1,19 +1,25 @@
 import { useState, useEffect } from 'react';
-import {
+import type {
   AnalysisResult,
   ActionItem,
   ChatMessage,
   Clause,
-  DocumentMetadata,
-  LawyerPrepKit,
-  LegalHealthScore,
   SilentRisk,
-  TimelineEvent
 } from '../types/document';
 import { SAMPLE_DOCUMENTS } from '../data/sampleDocuments';
 
+export type DocumentProcessingStatus =
+  | 'idle'
+  | 'uploading'
+  | 'extracting'
+  | 'analyzing'
+  | 'validating'
+  | 'ready'
+  | 'error';
+
 export interface DocumentStoreState {
-  currentDocument: AnalysisResult | null;
+  status: DocumentProcessingStatus;
+  currentDocument: (AnalysisResult & { documentId?: string }) | null;
   selectedClause: Clause | null;
   selectedRisk: SilentRisk | null;
   chatHistory: ChatMessage[];
@@ -23,8 +29,8 @@ export interface DocumentStoreState {
   error: string | null;
 }
 
-// Initial state starts with null or can load default sample
 let state: DocumentStoreState = {
+  status: 'idle',
   currentDocument: null,
   selectedClause: null,
   selectedRisk: null,
@@ -55,17 +61,32 @@ export const documentContextStore = {
     };
   },
 
-  setCurrentDocument(doc: AnalysisResult | null) {
+  setStatus(status: DocumentProcessingStatus, stageMessage?: string) {
+    state.status = status;
+    state.isAnalyzing = status !== 'idle' && status !== 'ready' && status !== 'error';
+    if (stageMessage) {
+      state.processingStage = stageMessage;
+    }
+    if (status === 'error') {
+      state.isAnalyzing = false;
+    }
+    notify();
+  },
+
+  setCurrentDocument(doc: (AnalysisResult & { documentId?: string }) | null) {
     state.currentDocument = doc;
     state.error = null;
+    state.status = doc ? 'ready' : 'idle';
     state.isAnalyzing = false;
-    // Pre-populate chat with welcome question suggestions
+    state.processingStage = 'Ready';
+
+    // Pre-populate chat with welcome prompt
     if (doc) {
       state.chatHistory = [
         {
           id: 'welcome-msg',
           sender: 'ai',
-          text: `I've analyzed "${doc.metadata.fileName}" (${doc.documentType}). I identified ${doc.risks.length} silent risks and computed an overall Legal Health Score of ${doc.healthScore.overallScore}/100. Feel free to ask me anything about obligations, deadlines, or specific clauses!`,
+          text: `I've analyzed "${doc.metadata.fileName}" (${doc.documentType}). I identified ${doc.risks.length} silent risks and computed an informational Legal Health Score of ${doc.healthScore.overallScore}/100. Feel free to ask me anything about obligations, deadlines, or specific clauses!`,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           citation: `${doc.documentType} Analysis`,
           evidenceStrength: 'Strong evidence',
@@ -82,14 +103,24 @@ export const documentContextStore = {
     state.processingStage = stage;
     state.processingPercent = percent;
     if (isAnalyzing) {
+      state.status = 'analyzing';
       state.error = null;
+    } else {
+      state.status = state.currentDocument ? 'ready' : 'idle';
     }
     notify();
   },
 
   setError(error: string | null) {
     state.error = error;
+    state.status = error ? 'error' : state.currentDocument ? 'ready' : 'idle';
     state.isAnalyzing = false;
+    notify();
+  },
+
+  clearError() {
+    state.error = null;
+    state.status = state.currentDocument ? 'ready' : 'idle';
     notify();
   },
 
@@ -128,11 +159,15 @@ export const documentContextStore = {
 
   loadSample(sampleId: string) {
     const sample = SAMPLE_DOCUMENTS.find(s => s.id === sampleId) || SAMPLE_DOCUMENTS[0];
-    this.setCurrentDocument(sample.precomputedAnalysis);
+    this.setCurrentDocument({
+      ...sample.precomputedAnalysis,
+      documentId: sample.id,
+    });
   },
 
   reset() {
     state = {
+      status: 'idle',
       currentDocument: null,
       selectedClause: null,
       selectedRisk: null,
@@ -158,10 +193,14 @@ export function useDocumentContext() {
 
   return {
     ...storeState,
-    setCurrentDocument: (doc: AnalysisResult | null) => documentContextStore.setCurrentDocument(doc),
+    setStatus: (status: DocumentProcessingStatus, msg?: string) =>
+      documentContextStore.setStatus(status, msg),
+    setCurrentDocument: (doc: (AnalysisResult & { documentId?: string }) | null) =>
+      documentContextStore.setCurrentDocument(doc),
     setProcessing: (analyzing: boolean, stage: string, percent: number) =>
       documentContextStore.setProcessing(analyzing, stage, percent),
     setError: (err: string | null) => documentContextStore.setError(err),
+    clearError: () => documentContextStore.clearError(),
     selectClause: (clause: Clause | null) => documentContextStore.selectClause(clause),
     selectRisk: (risk: SilentRisk | null) => documentContextStore.selectRisk(risk),
     toggleActionItem: (id: string) => documentContextStore.toggleActionItem(id),

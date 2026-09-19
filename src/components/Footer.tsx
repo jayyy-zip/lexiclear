@@ -42,11 +42,11 @@ export const Footer: React.FC = () => {
             © {new Date().getFullYear()} LexiClear Co-Pilot. Built with Google Gemini 3.8.
           </div>
           <div className="flex items-center space-x-4">
-            <span className="hover:text-slate-300">Privacy Compliant</span>
+            <span className="hover:text-slate-300">Session-Only Privacy</span>
             <span>•</span>
             <span className="hover:text-slate-300">Strict Document Grounding</span>
             <span>•</span>
-            <span className="hover:text-slate-300">Non-Hallucinatory Protocol</span>
+            <span className="hover:text-slate-300">Evidence-Grounded Verification</span>
           </div>
         </div>
       </div>

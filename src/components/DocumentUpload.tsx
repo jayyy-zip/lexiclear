@@ -57,26 +57,22 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
 
     try {
       // Stage 1: Reading document
-      setProcessing(true, 'Reading and parsing document text...', 25);
+      setProcessing(true, 'Reading and parsing document structure...', 30);
       const extracted = await extractDocumentText(file);
 
-      // Stage 2: Finding clauses
-      setProcessing(true, 'Extracting and segmenting clauses...', 50);
-      await new Promise(r => setTimeout(r, 400));
-
-      // Stage 3: Checking areas that need attention (Gemini AI call)
-      setProcessing(true, 'Spotting silent risks and checking asymmetric provisions...', 75);
+      // Stage 2: AI analysis
+      setProcessing(true, 'Spotting silent risks and analyzing clauses with Gemini...', 70);
       const analysis = await analyzeDocument({
         rawText: extracted.rawText,
         fileName: extracted.fileName,
         fileType: extracted.fileType,
         wordCount: extracted.wordCount,
         pageCount: extracted.pageCount || 1,
+        fileSize: extracted.fileSize,
       });
 
-      // Stage 4: Preparing summary and scoring
-      setProcessing(true, 'Calculating Legal Health Score and preparing action kit...', 95);
-      await new Promise(r => setTimeout(r, 400));
+      // Stage 3: Scoring & finalizing
+      setProcessing(true, 'Verifying evidence grounding and compiling Legal Health Score...', 95);
 
       setCurrentDocument(analysis);
       setProcessing(false, 'Complete', 100);
@@ -84,7 +80,10 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
       onUploadSuccess();
     } catch (err: any) {
       console.error('Document processing failed:', err);
-      const msg = err.message || 'An unexpected error occurred while analyzing the document.';
+      let msg = err.message || 'An unexpected error occurred while analyzing the document.';
+      if (msg.includes('undefined is not a function') || msg.toLowerCase().includes('readablestream')) {
+        msg = "LexiClear couldn't extract readable text from this PDF due to a browser compatibility issue. Try another PDF or an OCR-readable document.";
+      }
       setUploadError(msg);
       setError(msg);
       setProcessing(false, 'Error', 0);
@@ -242,9 +241,12 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
                   <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
                     {sample.category}
                   </span>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    {sample.fileType.toUpperCase()} • {sample.sizeFormatted}
-                  </span>
+                  <div className="flex items-center space-x-1.5">
+                    <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">Demo</span>
+                    <span className="text-[11px] font-mono text-slate-400">
+                      {sample.fileType.toUpperCase()}
+                    </span>
+                  </div>
                 </div>
 
                 <div>
@@ -258,7 +260,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
               </div>
 
               <div className="pt-4 mt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-indigo-600">
-                <span>Analyze this contract</span>
+                <span>Explore demo contract</span>
                 <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
               </div>
             </div>
@@ -267,10 +269,12 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
       </div>
 
       {/* Trust & Privacy Note */}
-      <div className="max-w-2xl mx-auto text-center space-y-2 pt-2">
-        <div className="inline-flex items-center space-x-1.5 text-xs text-slate-500">
-          <Shield className="w-4 h-4 text-emerald-600" />
-          <span>Documents are processed securely and never shared with third parties.</span>
+      <div className="max-w-3xl mx-auto text-center space-y-2 pt-4">
+        <div className="inline-flex items-start sm:items-center space-x-2 text-xs text-slate-600 bg-slate-100/80 px-4 py-2.5 rounded-xl border border-slate-200 text-left sm:text-center">
+          <Shield className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5 sm:mt-0" />
+          <span className="leading-relaxed">
+            <strong className="text-slate-800">Document processing:</strong> Your document is temporarily processed by LexiClear's server for analysis. LexiClear does not intentionally persist uploaded documents after the temporary analysis session.
+          </span>
         </div>
       </div>
     </div>
