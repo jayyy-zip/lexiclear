@@ -33,12 +33,17 @@ import { documentStore, EphemeralDocumentStore } from '../server/documentStore';
 import {
   AnalyzeDocumentRequestSchema,
   AskDocumentRequestSchema,
+  AnalyzeChunkRequestSchema,
+  FinalizeAnalysisRequestSchema,
   AiAnalysisPayloadSchema,
   ClauseSchema,
   SilentRiskSchema,
 } from '../src/types/schemas';
 import { app } from '../server';
+import vercelApp from '../api/index';
+import { chunkSections, findRelevantSections } from '../src/utils/chunker';
 import http from 'http';
+import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -335,100 +340,281 @@ async function runTestSuite() {
   const invalidAskReq = { question: '' };
   assert(AskDocumentRequestSchema.safeParse(invalidAskReq).success === false, 'AskDocumentRequestSchema rejects empty question');
 
+  // Valid ask request with relevantSections
+  const validAskSectionsReq = {
+    question: 'What is the deposit?',
+    relevantSections: [
+      { id: 's-1', text: 'Deposit is $2,000', startOffset: 0, endOffset: 18 }
+    ]
+  };
+  assert(AskDocumentRequestSchema.safeParse(validAskSectionsReq).success === true, 'AskDocumentRequestSchema validates relevantSections request');
+
+  // Chunk schema validation
+  const validChunkReq = {
+    documentId: 'doc-123',
+    chunkIndex: 0,
+    totalChunks: 2,
+    fileName: 'lease.pdf',
+    fileType: 'pdf' as const,
+    sections: [{ id: 'sec-1', text: 'Section 1 text', startOffset: 0, endOffset: 14 }],
+    chunkText: 'Section 1 text',
+  };
+  assert(AnalyzeChunkRequestSchema.safeParse(validChunkReq).success === true, 'AnalyzeChunkRequestSchema validates correct chunk payload');
+
+  const invalidChunkReq = { documentId: 'doc-123', chunkIndex: 0 };
+  assert(AnalyzeChunkRequestSchema.safeParse(invalidChunkReq).success === false, 'AnalyzeChunkRequestSchema rejects incomplete chunk payload');
+
+  // Finalize schema validation
+  const validFinalizeReq = {
+    documentId: 'doc-123',
+    fileName: 'lease.pdf',
+    sectionsTotal: 5,
+    sectionsAnalyzed: 5,
+    chunkSummaries: ['Part 1 summary', 'Part 2 summary'],
+    clauses: sampleDoc.precomputedAnalysis.clauses,
+    risks: sampleDoc.precomputedAnalysis.risks,
+  };
+  assert(FinalizeAnalysisRequestSchema.safeParse(validFinalizeReq).success === true, 'FinalizeAnalysisRequestSchema validates correct finalization payload');
+
   console.log('\n--- Section 21: Express API Integration Tests ---');
-  // Start server on a test port
-  const testPort = 3999;
-  const testServer = await new Promise<http.Server>(resolve => {
-    const s = app.listen(testPort, '127.0.0.1', () => resolve(s));
-  });
+  // In-memory request dispatcher for reliable testing in serverless and sandboxed environments without requiring network port binding
+  async function dispatchRequest(targetApp: any, options: { method?: string; url: string; headers?: Record<string, string>; body?: any }) {
+    return new Promise<{ status: number; headers: { get: (k: string) => string | null }; text: () => Promise<string>; json: () => Promise<any> }>((resolve, reject) => {
+      const socket = new net.Socket();
+      const req = new http.IncomingMessage(socket);
+      req.method = options.method || 'GET';
+      req.url = options.url;
+      req.headers = { host: 'localhost', ...(options.headers || {}) };
 
-  try {
-    // 21A: GET /api/health
-    const healthRes = await fetch(`http://127.0.0.1:${testPort}/api/health`);
-    assert(healthRes.status === 200, 'GET /api/health returns HTTP 200');
-    const healthJson = await healthRes.json();
-    assert(healthJson.status === 'ok', 'Health response status is "ok"');
-    assert(healthJson.service === 'lexiclear-api', 'Health response identifies service');
-    assert(healthJson.geminiKeySet === undefined, 'Health endpoint does NOT leak secret or key status');
+      const bodyBuffer = options.body ? Buffer.from(typeof options.body === 'string' ? options.body : JSON.stringify(options.body)) : Buffer.alloc(0);
+      if (bodyBuffer.length > 0 && !req.headers['content-length']) {
+        req.headers['content-length'] = String(bodyBuffer.length);
+      }
 
-    // 21B: GET /api/ready
-    const readyRes = await fetch(`http://127.0.0.1:${testPort}/api/ready`);
-    assert(readyRes.status === 200, 'GET /api/ready returns HTTP 200');
-    const readyJson = await readyRes.json();
-    assert(readyJson.ready === true, 'Readiness response indicates ready');
+      const res = new http.ServerResponse(req);
+      const chunks: Buffer[] = [];
 
-    // 21C: Request ID Header verification
-    assert(Boolean(healthRes.headers.get('x-request-id')), 'API attaches X-Request-ID header to responses');
+      const origEnd = res.end.bind(res);
+      (res as any).write = function(chunk: any) {
+        if (chunk) chunks.push(Buffer.from(chunk));
+        return true;
+      };
+      (res as any).end = function(chunk?: any, encoding?: any, cb?: any) {
+        if (chunk && typeof chunk !== 'function') chunks.push(Buffer.from(chunk));
+        origEnd.call(res, chunk, encoding, cb);
+        const responseBody = Buffer.concat(chunks).toString('utf-8');
+        const resHeaders = res.getHeaders();
+        resolve({
+          status: res.statusCode,
+          headers: {
+            get: (k: string) => {
+              const val = resHeaders[k.toLowerCase()];
+              return val !== undefined ? String(val) : null;
+            }
+          },
+          text: async () => responseBody,
+          json: async () => JSON.parse(responseBody)
+        });
+        return res;
+      };
 
-    // 21D: Security Headers verification
-    assert(healthRes.headers.get('x-content-type-options') === 'nosniff', 'Security header X-Content-Type-Options is nosniff');
-    assert(healthRes.headers.get('x-frame-options') === 'DENY', 'Security header X-Frame-Options is DENY');
+      try {
+        targetApp(req, res);
+      } catch (err) {
+        reject(err);
+      }
 
-    // 21E: POST /api/v1/analyze-document with invalid payload
-    const badAnalyzeRes = await fetch(`http://127.0.0.1:${testPort}/api/v1/analyze-document`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rawText: 'Too short' }),
+      if (bodyBuffer.length > 0) {
+        req.push(bodyBuffer);
+      }
+      req.push(null);
     });
-    assert(badAnalyzeRes.status === 400, 'POST /api/v1/analyze-document returns 400 on invalid payload');
-    const badAnalyzeJson = await badAnalyzeRes.json();
-    assert(badAnalyzeJson.error?.code === 'INVALID_DOCUMENT', 'API returns structured error code INVALID_DOCUMENT');
-    assert(Boolean(badAnalyzeJson.requestId), 'Error envelope contains requestId');
-    assert(!badAnalyzeJson.stack, 'Error response does NOT leak stack trace');
-
-    // 21F: POST /api/v1/ask-document with missing context
-    const badAskRes = await fetch(`http://127.0.0.1:${testPort}/api/v1/ask-document`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: 'What is the rent?' }),
-    });
-    assert(badAskRes.status === 400, 'POST /api/v1/ask-document returns 400 when documentId/rawText is missing');
-    const badAskJson = await badAskRes.json();
-    assert(badAskJson.error?.code === 'MISSING_DOCUMENT_CONTEXT', 'Returns MISSING_DOCUMENT_CONTEXT error code');
-
-    // 21G: POST /api/v1/ask-document with absent documentId
-    const absentAskRes = await fetch(`http://127.0.0.1:${testPort}/api/v1/ask-document`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documentId: 'non-existent-doc-id', question: 'What is the rent?' }),
-    });
-    assert(absentAskRes.status === 200, 'POST /api/v1/ask-document handles absent context gracefully');
-    const absentAskJson = await absentAskRes.json();
-    assert(absentAskJson.isNotFound === true, 'Returns isNotFound: true for absent context');
-    assert(absentAskJson.answer === "I couldn't find that information in the uploaded document.", 'Returns standard anti-hallucination fallback');
-
-    // 21H: Backward-Compatible Legacy Routes: POST /api/analyze-document
-    const legacyAnalyzeRes = await fetch(`http://127.0.0.1:${testPort}/api/analyze-document`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rawText: 'Too short' }),
-    });
-    assert(legacyAnalyzeRes.status === 400, 'Legacy alias POST /api/analyze-document is reachable and validates input');
-    const legacyAnalyzeJson = await legacyAnalyzeRes.json();
-    assert(legacyAnalyzeJson.error?.code === 'INVALID_DOCUMENT', 'Legacy analyze returns INVALID_DOCUMENT code');
-
-    // 21I: Backward-Compatible Legacy Routes: POST /api/ask-document
-    const legacyAskRes = await fetch(`http://127.0.0.1:${testPort}/api/ask-document`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: 'What is the rent?' }),
-    });
-    assert(legacyAskRes.status === 400, 'Legacy alias POST /api/ask-document is reachable and validates context');
-    const legacyAskJson = await legacyAskRes.json();
-    assert(legacyAskJson.error?.code === 'MISSING_DOCUMENT_CONTEXT', 'Legacy ask returns MISSING_DOCUMENT_CONTEXT');
-
-    const legacyAbsentAskRes = await fetch(`http://127.0.0.1:${testPort}/api/ask-document`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documentId: 'non-existent-legacy-doc', question: 'When does the lease expire?' }),
-    });
-    assert(legacyAbsentAskRes.status === 200, 'Legacy ask handles absent documentId with 200 OK');
-    const legacyAbsentAskJson = await legacyAbsentAskRes.json();
-    assert(legacyAbsentAskJson.isNotFound === true, 'Legacy ask returns isNotFound: true for absent document');
-
-  } finally {
-    await new Promise<void>(resolve => testServer.close(() => resolve()));
   }
+
+  // 21A: GET /api/health
+  const healthRes = await dispatchRequest(app, { method: 'GET', url: '/api/health' });
+  assert(healthRes.status === 200, 'GET /api/health returns HTTP 200');
+  const healthJson = await healthRes.json();
+  assert(healthJson.status === 'ok', 'Health response status is "ok"');
+  assert(healthJson.service === 'lexiclear-api', 'Health response identifies service');
+  assert(healthJson.geminiKeySet === undefined, 'Health endpoint does NOT leak secret or key status');
+
+  // 21B: GET /api/ready
+  const readyRes = await dispatchRequest(app, { method: 'GET', url: '/api/ready' });
+  assert(readyRes.status === 200, 'GET /api/ready returns HTTP 200');
+  const readyJson = await readyRes.json();
+  assert(readyJson.ready === true, 'Readiness response indicates ready');
+
+  // 21C: Request ID Header verification
+  assert(Boolean(healthRes.headers.get('x-request-id')), 'API attaches X-Request-ID header to responses');
+
+  // 21D: Security Headers verification
+  assert(healthRes.headers.get('x-content-type-options') === 'nosniff', 'Security header X-Content-Type-Options is nosniff');
+  assert(healthRes.headers.get('x-frame-options') === 'DENY', 'Security header X-Frame-Options is DENY');
+
+  // 21E: POST /api/v1/analyze-document with invalid payload
+  const badAnalyzeRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/v1/analyze-document',
+    headers: { 'content-type': 'application/json' },
+    body: { rawText: 'Too short' },
+  });
+  assert(badAnalyzeRes.status === 400, 'POST /api/v1/analyze-document returns 400 on invalid payload');
+  const badAnalyzeJson = await badAnalyzeRes.json();
+  assert(badAnalyzeJson.error?.code === 'INVALID_DOCUMENT', 'API returns structured error code INVALID_DOCUMENT');
+  assert(Boolean(badAnalyzeJson.requestId), 'Error envelope contains requestId');
+  assert(!badAnalyzeJson.stack, 'Error response does NOT leak stack trace');
+
+  // 21F: POST /api/v1/ask-document with missing context
+  const badAskRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/v1/ask-document',
+    headers: { 'content-type': 'application/json' },
+    body: { question: 'What is the rent?' },
+  });
+  assert(badAskRes.status === 400, 'POST /api/v1/ask-document returns 400 when documentId/rawText is missing');
+  const badAskJson = await badAskRes.json();
+  assert(badAskJson.error?.code === 'MISSING_DOCUMENT_CONTEXT', 'Returns MISSING_DOCUMENT_CONTEXT error code');
+
+  // 21G: POST /api/v1/ask-document with absent documentId
+  const absentAskRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/v1/ask-document',
+    headers: { 'content-type': 'application/json' },
+    body: { documentId: 'non-existent-doc-id', question: 'What is the rent?' },
+  });
+  assert(absentAskRes.status === 200, 'POST /api/v1/ask-document handles absent context gracefully');
+  const absentAskJson = await absentAskRes.json();
+  assert(absentAskJson.isNotFound === true, 'Returns isNotFound: true for absent context');
+  assert(absentAskJson.answer === "I couldn't find that information in the uploaded document.", 'Returns standard anti-hallucination fallback');
+
+  // 21H: Backward-Compatible Legacy Routes: POST /api/analyze-document
+  const legacyAnalyzeRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/analyze-document',
+    headers: { 'content-type': 'application/json' },
+    body: { rawText: 'Too short' },
+  });
+  assert(legacyAnalyzeRes.status === 400, 'Legacy alias POST /api/analyze-document is reachable and validates input');
+  const legacyAnalyzeJson = await legacyAnalyzeRes.json();
+  assert(legacyAnalyzeJson.error?.code === 'INVALID_DOCUMENT', 'Legacy analyze returns INVALID_DOCUMENT code');
+
+  // 21I: Backward-Compatible Legacy Routes: POST /api/ask-document
+  const legacyAskRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/ask-document',
+    headers: { 'content-type': 'application/json' },
+    body: { question: 'What is the rent?' },
+  });
+  assert(legacyAskRes.status === 400, 'Legacy alias POST /api/ask-document is reachable and validates context');
+  const legacyAskJson = await legacyAskRes.json();
+  assert(legacyAskJson.error?.code === 'MISSING_DOCUMENT_CONTEXT', 'Legacy ask returns MISSING_DOCUMENT_CONTEXT');
+
+  const legacyAbsentAskRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/ask-document',
+    headers: { 'content-type': 'application/json' },
+    body: { documentId: 'non-existent-legacy-doc', question: 'When does the lease expire?' },
+  });
+  assert(legacyAbsentAskRes.status === 200, 'Legacy ask handles absent documentId with 200 OK');
+  const legacyAbsentAskJson = await legacyAbsentAskRes.json();
+  assert(legacyAbsentAskJson.isNotFound === true, 'Legacy ask returns isNotFound: true for absent document');
+
+  // 21J: POST /api/v1/analyze-chunk invalid payload validation
+  const badChunkRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/v1/analyze-chunk',
+    headers: { 'content-type': 'application/json' },
+    body: { documentId: 'doc-1' },
+  });
+  assert(badChunkRes.status === 400, 'POST /api/v1/analyze-chunk returns 400 on incomplete payload');
+  const badChunkJson = await badChunkRes.json();
+  assert(badChunkJson.error?.code === 'INVALID_CHUNK', 'Returns INVALID_CHUNK error code');
+
+  // 21K: POST /api/v1/finalize-analysis invalid payload validation
+  const badFinalizeRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/v1/finalize-analysis',
+    headers: { 'content-type': 'application/json' },
+    body: { documentId: 'doc-1' },
+  });
+  assert(badFinalizeRes.status === 400, 'POST /api/v1/finalize-analysis returns 400 on incomplete payload');
+  const badFinalizeJson = await badFinalizeRes.json();
+  assert(badFinalizeJson.error?.code === 'INVALID_FINALIZATION', 'Returns INVALID_FINALIZATION error code');
+
+  // 21L: POST /api/v1/finalize-analysis valid aggregation & deterministic scoring
+  const goodFinalizeRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/v1/finalize-analysis',
+    headers: { 'content-type': 'application/json' },
+    body: {
+      documentId: 'doc-final-test',
+      fileName: 'Aggregated_Contract.pdf',
+      fileType: 'pdf',
+      fileSize: 1024 * 50,
+      wordCount: 800,
+      pageCount: 3,
+      sectionsTotal: 4,
+      sectionsAnalyzed: 4,
+      chunkSummaries: ['Overview of obligations', 'Detailed liability clauses'],
+      clauses: sampleDoc.precomputedAnalysis.clauses,
+      risks: sampleDoc.precomputedAnalysis.risks,
+      healthDimensions: {
+        fairness: { score: 70, keyFinding: 'Balanced obligations' },
+        clarity: { score: 75, keyFinding: 'Clear terms' },
+      },
+    },
+  });
+  assert(goodFinalizeRes.status === 200, 'POST /api/v1/finalize-analysis succeeds with HTTP 200');
+  const goodFinalizeJson = await goodFinalizeRes.json();
+  assert(goodFinalizeJson.documentId === 'doc-final-test', 'Finalized analysis preserves documentId');
+  assert(typeof goodFinalizeJson.healthScore?.overallScore === 'number', 'Calculates valid deterministic health score');
+  assert(goodFinalizeJson.coverage?.coverageComplete === true, 'Honest coverage reports complete');
+  assert(goodFinalizeJson.actionChecklist?.length > 0, 'Assembles action checklist from risks');
+  assert(goodFinalizeJson.lawyerPrepKit?.topConcerns?.length > 0, 'Assembles lawyer prep kit');
+
+  // 21M: POST /api/v1/ask-document stateless Q&A with relevantSections (cache miss scenario)
+  const statelessAskRes = await dispatchRequest(app, {
+    method: 'POST',
+    url: '/api/v1/ask-document',
+    headers: { 'content-type': 'application/json' },
+    body: {
+      documentId: 'uncached-serverless-doc',
+      question: 'What is the deposit amount?',
+      relevantSections: [
+        {
+          id: 'sec-deposit',
+          heading: 'Clause 3: Security Deposit',
+          text: 'Tenant shall deposit $4,000 as security deposit.',
+          page: 1,
+          startOffset: 0,
+          endOffset: 48,
+        },
+      ],
+    },
+  });
+  assert(statelessAskRes.status === 200, 'POST /api/v1/ask-document with relevantSections returns 200 OK');
+  const statelessAskJson = await statelessAskRes.json();
+  assert(statelessAskJson.isNotFound !== undefined, 'Returns structured Q&A response without requiring cached server documentId');
+
+  // 21N: Vercel Function Entrypoint Export Check
+  assert(typeof vercelApp === 'function', 'api/index.ts exports valid Express request handler for Vercel Functions');
+
+  // 21O: Local Section Relevance Ranking Check
+  const testSections = [
+    { id: 's-1', heading: 'Term & Renewal', text: 'The lease term is 12 months with 60 days notice.', startOffset: 0, endOffset: 50 },
+    { id: 's-2', heading: 'Rent & Security Deposit', text: 'Rent is $3,000. Deposit is $6,000.', startOffset: 52, endOffset: 86 },
+    { id: 's-3', heading: 'Maintenance & Pets', text: 'Tenant maintains garden. No dogs allowed.', startOffset: 88, endOffset: 130 },
+  ];
+  const depositMatches = findRelevantSections('How much is the deposit fee?', testSections);
+  assert(depositMatches.length > 0, 'findRelevantSections identifies matching section');
+  assert(depositMatches[0]?.id === 's-2', 'Correctly ranks Rent & Security Deposit as top section');
+
+  // 21P: Document Chunking Bounded Size Check
+  const chunkBatches = chunkSections(testSections, 70);
+  assert(chunkBatches.length >= 2, 'chunkSections splits sections exceeding maxChars into batches');
+  assert(chunkBatches[0]?.chunkText.length > 0, 'Chunk batch contains section text');
+  assert(chunkBatches[0]?.totalChunks === chunkBatches.length, 'totalChunks accurately reflects batch count');
 
   console.log('\n--- Section 22: Document Format & Edge Case Tests ---');
   // TXT format validation

@@ -71,6 +71,7 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
       const response = await answerDocumentQuestion({
         documentId: (document as any).documentId || document.metadata.id,
         rawText: document.metadata.rawText || document.summary,
+        sections: (document as any).sections || (document.metadata as any).sections,
         question: trimmed,
         documentType: document.documentType,
         clauses: document.clauses,
@@ -109,7 +110,7 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col h-[700px] max-h-[85vh]">
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col h-[700px] max-h-[calc(100dvh-12rem)] min-h-[400px]">
       {/* Chat Header */}
       <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between">
         <div className="flex items-center space-x-3">
@@ -258,7 +259,11 @@ export const AskDocumentChat: React.FC<AskDocumentChatProps> = ({
       </div>
 
       {/* Chat Input Bar */}
-      <form onSubmit={handleSubmit} className="p-4 border-t border-slate-200 bg-white">
+      <form
+        onSubmit={handleSubmit}
+        className="p-3 sm:p-4 border-t border-slate-200 bg-white sticky bottom-0 z-10"
+        style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom, 0px))' }}
+      >
         <div className="flex items-center space-x-2">
           <input
             type="text"

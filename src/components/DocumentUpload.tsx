@@ -69,12 +69,20 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
         wordCount: extracted.wordCount,
         pageCount: extracted.pageCount || 1,
         fileSize: extracted.fileSize,
+        sections: extracted.sections,
       });
 
       // Stage 3: Scoring & finalizing
       setProcessing(true, 'Verifying evidence grounding and compiling Legal Health Score...', 95);
 
-      setCurrentDocument(analysis);
+      setCurrentDocument({
+        ...analysis,
+        metadata: {
+          ...analysis.metadata,
+          rawText: extracted.rawText,
+        },
+        sections: extracted.sections,
+      });
       setProcessing(false, 'Complete', 100);
       if (onCloseModal) onCloseModal();
       onUploadSuccess();

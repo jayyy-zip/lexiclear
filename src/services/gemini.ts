@@ -6,18 +6,27 @@ import type {
   TimelineEvent,
   LawyerPrepKit,
   DocumentQAResponse,
+  DocumentSectionRef,
 } from '../types/schemas';
 import { SAMPLE_DOCUMENTS } from '../data/sampleDocuments';
 import { apiClient } from './apiClient';
+import {
+  segmentDocumentIntoSections,
+  chunkSections,
+  findRelevantSections,
+  type DocumentSectionChunk,
+} from '../utils/chunker';
 
 /**
  * Client-side analysis service coordinating API client requests,
- * deterministic sample matching, and local state management.
+ * chunking for Vercel payload safety, and deterministic sample matching.
  * ZERO Gemini keys or SDK imports are present in the frontend bundle.
  */
 
 // Active session cache to avoid duplicate API requests
 const analysisCache = new Map<string, AnalysisResult & { documentId?: string }>();
+
+const CHUNK_THRESHOLD_CHARS = 40000;
 
 export async function analyzeDocument(params: {
   rawText: string;
@@ -26,6 +35,7 @@ export async function analyzeDocument(params: {
   wordCount: number;
   pageCount?: number | string;
   fileSize?: number;
+  sections?: DocumentSectionChunk[];
   useCache?: boolean;
 }): Promise<AnalysisResult & { documentId?: string }> {
   const cacheKey = `${params.fileName}_${params.wordCount}_${params.rawText.slice(0, 80)}`;
@@ -41,17 +51,87 @@ export async function analyzeDocument(params: {
   );
 
   try {
-    const result = await apiClient.analyzeDocument({
-      rawText: params.rawText,
-      fileName: params.fileName,
-      fileType: params.fileType,
-      wordCount: params.wordCount,
-      pageCount: params.pageCount,
-      fileSize: params.fileSize,
-    });
+    const sections = params.sections || segmentDocumentIntoSections(params.rawText, params.pageCount);
+    let result: AnalysisResult & { documentId: string };
 
-    analysisCache.set(cacheKey, result);
-    return result;
+    // If document is large, use chunked analysis to stay comfortably below Vercel's 4.5MB request limit
+    if (params.rawText.length > CHUNK_THRESHOLD_CHARS) {
+      const batches = chunkSections(sections, CHUNK_THRESHOLD_CHARS);
+
+      if (batches.length > 1) {
+        const documentId = `doc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        const allClauses: Clause[] = [];
+        const allRisks: SilentRisk[] = [];
+        const chunkSummaries: string[] = [];
+        const combinedDimensions: Record<string, { score: number; keyFinding: string }> = {};
+
+        for (const batch of batches) {
+          const chunkRes = await apiClient.analyzeChunk({
+            documentId,
+            chunkIndex: batch.chunkIndex,
+            totalChunks: batch.totalChunks,
+            fileName: params.fileName,
+            fileType: params.fileType,
+            sections: batch.sections,
+            chunkText: batch.chunkText,
+          });
+
+          if (chunkRes.clauses) allClauses.push(...chunkRes.clauses);
+          if (chunkRes.risks) allRisks.push(...chunkRes.risks);
+          if (chunkRes.summary) chunkSummaries.push(chunkRes.summary);
+          if (chunkRes.healthDimensions) {
+            Object.assign(combinedDimensions, chunkRes.healthDimensions);
+          }
+        }
+
+        result = await apiClient.finalizeAnalysis({
+          documentId,
+          fileName: params.fileName,
+          fileType: params.fileType,
+          fileSize: params.fileSize,
+          wordCount: params.wordCount,
+          pageCount: params.pageCount,
+          sectionsTotal: sections.length,
+          sectionsAnalyzed: sections.length,
+          chunkSummaries,
+          clauses: allClauses,
+          risks: allRisks,
+          healthDimensions: combinedDimensions,
+        });
+      } else {
+        result = await apiClient.analyzeDocument({
+          rawText: params.rawText,
+          fileName: params.fileName,
+          fileType: params.fileType,
+          wordCount: params.wordCount,
+          pageCount: params.pageCount,
+          fileSize: params.fileSize,
+        });
+      }
+    } else {
+      // Standard small/medium document: single analysis request
+      result = await apiClient.analyzeDocument({
+        rawText: params.rawText,
+        fileName: params.fileName,
+        fileType: params.fileType,
+        wordCount: params.wordCount,
+        pageCount: params.pageCount,
+        fileSize: params.fileSize,
+      });
+    }
+
+    // Attach rawText and sections to client-side document object for local display and Q&A
+    const completeClientDoc = {
+      ...result,
+      metadata: {
+        ...result.metadata,
+        rawText: params.rawText,
+      },
+      sections,
+    };
+
+    analysisCache.set(cacheKey, completeClientDoc);
+    return completeClientDoc;
   } catch (error: any) {
     console.warn('[LexiClear] Server analysis call failed:', error?.message);
 
@@ -60,6 +140,10 @@ export async function analyzeDocument(params: {
       const sampleResult = {
         ...sampleMatch.precomputedAnalysis,
         documentId: sampleMatch.id,
+        metadata: {
+          ...sampleMatch.precomputedAnalysis.metadata,
+          rawText: sampleMatch.rawText,
+        },
       };
       analysisCache.set(cacheKey, sampleResult);
       return sampleResult;
@@ -90,21 +174,36 @@ export async function extractTimeline(analysis: AnalysisResult): Promise<Timelin
 }
 
 /**
- * Ask Document Q&A using server-side grounding.
- * Prefers documentId over resending full rawText.
+ * Ask Document Q&A using stateless section-based grounding.
+ * Identifies top relevant sections locally so payload stays tiny (< 25KB),
+ * avoiding oversized requests and surviving across separate Vercel instances.
  */
 export async function answerDocumentQuestion(params: {
   question: string;
   documentId?: string;
   rawText?: string;
+  sections?: DocumentSectionChunk[];
   documentType?: string;
   clauses?: Clause[];
 }): Promise<DocumentQAResponse> {
+  // Extract or locate document sections
+  let docSections = params.sections;
+  if (!docSections && params.rawText) {
+    docSections = segmentDocumentIntoSections(params.rawText);
+  }
+
+  // Find top relevant sections locally to keep request payload safely under Vercel limits
+  let relevantSections: DocumentSectionRef[] | undefined = undefined;
+  if (docSections && docSections.length > 0) {
+    relevantSections = findRelevantSections(params.question, docSections, 25000);
+  }
+
   try {
     return await apiClient.askDocument({
       documentId: params.documentId,
       question: params.question,
-      rawText: params.rawText,
+      relevantSections,
+      rawText: relevantSections && relevantSections.length > 0 ? undefined : params.rawText,
       documentType: params.documentType,
       clauses: params.clauses,
     });

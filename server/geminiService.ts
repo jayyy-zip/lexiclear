@@ -6,6 +6,10 @@ import {
   type DocumentQAResponse,
   type SilentRisk,
   type Clause,
+  type AnalyzeChunkResponse,
+  type FinalizeAnalysisRequest,
+  type DocumentSectionRef,
+  type DocumentCoverage,
 } from '../src/types/schemas';
 import { buildAnalysisPrompt } from './prompts/analysisPrompt';
 import { buildQAPrompt } from './prompts/qaPrompt';
@@ -153,7 +157,6 @@ export async function analyzeDocumentServer(params: {
       }),
       wordCount,
       pageCount: params.pageCount,
-      rawText: params.rawText,
       coverage,
     },
     documentType: validatedPayload.documentType || 'Legal Document',
@@ -225,29 +228,293 @@ export async function analyzeDocumentServer(params: {
 }
 
 /**
+ * Server-side chunk analysis pipeline for large documents.
+ * Kept well under Vercel payload limits (target <= 1.5MB request).
+ */
+export async function analyzeChunkServer(params: {
+  documentId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  fileName: string;
+  fileType: 'pdf' | 'docx' | 'txt';
+  sections: DocumentSectionRef[];
+  chunkText: string;
+}): Promise<AnalyzeChunkResponse> {
+  const prompt = buildAnalysisPrompt(params.chunkText, {
+    fileName: `${params.fileName} (Part ${params.chunkIndex + 1} of ${params.totalChunks})`,
+    fileType: params.fileType,
+  });
+
+  const ai = getAiClient();
+  const modelName = getGeminiModel();
+
+  let parsedJson: any = {};
+  try {
+    const response = await ai.models.generateContent({
+      model: modelName,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.1,
+      },
+    });
+
+    const rawTextResponse = response.text || '{}';
+    parsedJson = JSON.parse(cleanJsonString(rawTextResponse));
+  } catch (err: any) {
+    console.error(`Gemini chunk ${params.chunkIndex} error:`, err?.message || err);
+    throw new Error('AI analysis service was unable to process this document section safely.');
+  }
+
+  const validationResult = AiAnalysisPayloadSchema.safeParse(parsedJson);
+  const validatedPayload = validationResult.success ? validationResult.data : parsedJson;
+
+  const clauses: Clause[] = (validatedPayload.clauses || []).map((c: any, idx: number) => ({
+    id: c.id || `c-p${params.chunkIndex + 1}-${idx + 1}`,
+    title: c.title || `Clause ${idx + 1}`,
+    text: c.text || '',
+    page: c.page || undefined,
+    type: c.type || 'provision',
+    obligations: Array.isArray(c.obligations) ? c.obligations : [],
+    rights: Array.isArray(c.rights) ? c.rights : [],
+    dates: Array.isArray(c.dates) ? c.dates : [],
+    financialExposure: c.financialExposure || 'Standard',
+    riskIndicators: Array.isArray(c.riskIndicators) ? c.riskIndicators : [],
+    plainEnglish: c.plainEnglish,
+    whyItMatters: c.whyItMatters,
+  }));
+
+  const rawRisks: SilentRisk[] = (validatedPayload.risks || []).map((r: any, idx: number) => ({
+    id: r.id || `risk-p${params.chunkIndex + 1}-${idx + 1}`,
+    clauseId: r.clauseId || (clauses[0]?.id || `c-p${params.chunkIndex + 1}-1`),
+    severity: normalizeSeverity(r.severity),
+    title: r.title || `Risk ${idx + 1}`,
+    reason: r.reason || '',
+    evidence: r.evidence || '',
+    evidenceStrength: normalizeEvidenceStrength(r.evidenceStrength),
+    userImpact: r.userImpact || '',
+    questionToConsider: r.questionToConsider || '',
+    plainEnglishTranslation: r.plainEnglishTranslation,
+    clauseTitle: r.clauseTitle,
+    pageReference: r.pageReference,
+  }));
+
+  const groundedRisks = verifyRisksGrounding(params.chunkText, deduplicateRisks(rawRisks), params.sections);
+
+  return {
+    chunkIndex: params.chunkIndex,
+    totalChunks: params.totalChunks,
+    clauses,
+    risks: groundedRisks,
+    healthDimensions: validatedPayload.healthDimensions,
+    summary: validatedPayload.summary,
+    parties: validatedPayload.parties,
+    importantDates: validatedPayload.importantDates,
+    financialTerms: validatedPayload.financialTerms,
+    obligations: validatedPayload.obligations,
+    terminationTerms: validatedPayload.terminationTerms,
+    disputeResolution: validatedPayload.disputeResolution,
+    documentType: validatedPayload.documentType,
+  };
+}
+
+/**
+ * Server-side analysis finalization.
+ * Merges multi-chunk findings, runs deterministic risk engine scoring, and assembles outputs.
+ */
+export async function finalizeAnalysisServer(params: FinalizeAnalysisRequest): Promise<AnalysisResult & { documentId: string }> {
+  const documentId = params.documentId || `doc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const wordCount = params.wordCount || 0;
+  const fileSize = params.fileSize || 0;
+
+  // Deduplicate clauses by title or text
+  const seenClauseTitles = new Set<string>();
+  const deduplicatedClauses: Clause[] = [];
+  for (const c of params.clauses) {
+    const key = (c.title || c.text.slice(0, 50)).toLowerCase().trim();
+    if (!seenClauseTitles.has(key)) {
+      seenClauseTitles.add(key);
+      deduplicatedClauses.push(c);
+    }
+  }
+
+  // Deduplicate risks
+  const deduplicatedRisks = deduplicateRisks(params.risks);
+
+  // Compute deterministic health score
+  const combinedSummary = params.chunkSummaries.filter(Boolean).join(' ') || 'Comprehensive document analysis.';
+  const healthScore = computeDeterministicHealthScore(
+    params.healthDimensions,
+    deduplicatedRisks,
+    combinedSummary
+  );
+
+  const coverage: DocumentCoverage = {
+    sectionsAnalyzed: params.sectionsAnalyzed,
+    sectionsTotal: params.sectionsTotal,
+    coverageComplete: params.sectionsAnalyzed >= params.sectionsTotal,
+  };
+
+  const analysisResult: AnalysisResult & { documentId: string } = {
+    documentId,
+    metadata: {
+      id: documentId,
+      fileName: params.fileName,
+      fileSize,
+      fileType: params.fileType,
+      uploadDate: new Date().toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      }),
+      wordCount,
+      pageCount: params.pageCount,
+      coverage,
+    },
+    documentType: params.documentType || 'Legal Document',
+    parties: params.parties || ['Parties as designated in agreement'],
+    jurisdiction: params.jurisdiction || 'Jurisdiction not specified',
+    summary: combinedSummary,
+    importantDates: params.importantDates || [],
+    financialTerms: params.financialTerms || [],
+    obligations: params.obligations || [],
+    terminationTerms: params.terminationTerms || [],
+    disputeResolution: params.disputeResolution || 'Governing law as specified in agreement.',
+    clauses: deduplicatedClauses,
+    risks: deduplicatedRisks,
+    healthScore,
+    actionChecklist: deduplicatedRisks.map((r, idx) => ({
+      id: `act-${idx + 1}`,
+      title: `Review: ${r.title}`,
+      reason: r.reason || 'Identified potential risk requiring review.',
+      clauseReference: r.clauseTitle || 'Agreement Terms',
+      priority: r.severity,
+      completed: false,
+      category: 'negotiate' as const,
+    })),
+    timeline: (params.importantDates || []).map((d, idx) => ({
+      id: `time-${idx + 1}`,
+      date: d,
+      title: `Key Date / Milestone ${idx + 1}`,
+      description: d,
+      clauseReference: 'Agreement Schedule',
+      priority: 'medium' as const,
+    })),
+    lawyerPrepKit: {
+      documentSummary: combinedSummary,
+      topConcerns: deduplicatedRisks.slice(0, 5).map(r => r.title),
+      importantFinancialExposure: params.financialTerms || [],
+      importantClauses: deduplicatedClauses.slice(0, 3).map(c => ({
+        title: c.title,
+        reference: c.page ? `Page ${c.page}` : c.title,
+        summary: c.plainEnglish || c.title,
+        flagReason: 'Core operating section',
+      })),
+      questionsForLawyer: [
+        'Are any of the highlighted risk provisions subject to local statutory caps or protections?',
+        'What specific amendments should we propose for mutual reciprocity?',
+      ],
+      supportingDocumentsToBring: [
+        'Original executed or draft contract',
+        'Relevant email communications and fee schedules',
+      ],
+      disclaimer: 'LexiClear provides informational document analysis, not legal advice.',
+    },
+    coverage,
+  };
+
+  // Best-effort cache in documentStore
+  documentStore.set(documentId, {
+    documentId,
+    fileName: params.fileName,
+    fileType: params.fileType,
+    rawText: '',
+    sections: [],
+    clauses: deduplicatedClauses,
+    risks: deduplicatedRisks,
+    analysis: analysisResult,
+  });
+
+  return analysisResult;
+}
+
+/**
  * Server-side grounded Q&A.
+ * Stateless fallback: works whether documentId is cached on this server instance or not.
  */
 export async function answerDocumentQuestionServer(params: {
   documentId?: string;
   question: string;
+  relevantSections?: DocumentSectionRef[];
   rawText?: string;
   documentType?: string;
   clauses?: any[];
 }): Promise<DocumentQAResponse & { documentId?: string }> {
-  let docText = params.rawText || '';
+  let docText = '';
   let sections: any[] | undefined = undefined;
 
-  // Retrieve from server store if documentId provided
+  // 1. If relevantSections supplied, build context directly from them (stateless fallback)
+  if (params.relevantSections && params.relevantSections.length > 0) {
+    docText = params.relevantSections
+      .map(s => (s.heading ? `[${s.heading}]\n` : '') + s.text)
+      .join('\n\n');
+    sections = params.relevantSections;
+  }
+
+  // 2. Check server documentStore cache (best-effort optimization)
   if (params.documentId) {
     const stored = documentStore.get(params.documentId);
     if (stored) {
-      docText = stored.rawText;
-      sections = stored.sections;
+      if (!docText) {
+        docText = stored.rawText;
+        sections = stored.sections;
+      } else if (!sections || sections.length === 0) {
+        sections = stored.sections;
+      }
     }
   }
 
+  // 3. Fallback to rawText if provided
+  if (!docText && params.rawText) {
+    docText = params.rawText;
+  }
+
+  // 4. Absence guard: if no text context found
   if (!docText || !docText.trim()) {
     return {
+      documentId: params.documentId,
+      answer: "I couldn't find that information in the uploaded document.",
+      isNotFound: true,
+      evidenceStrength: 'Limited evidence',
+    };
+  }
+
+  // 5. If running in environment without GEMINI_API_KEY (e.g. automated test suites, offline demo), provide deterministic extraction
+  if (!process.env.GEMINI_API_KEY) {
+    const queryLower = params.question.toLowerCase();
+    const sentences = docText.split(/(?<=[.!?\n])\s+/).filter(s => s.trim().length > 10);
+    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 3);
+    const matchedSentence = sentences.find(s => {
+      const sLower = s.toLowerCase();
+      return queryWords.some(w => sLower.includes(w));
+    });
+
+    if (matchedSentence) {
+      const verifiedLoc = verifyEvidenceSnippet(docText, matchedSentence.trim(), sections);
+      return {
+        documentId: params.documentId,
+        answer: matchedSentence.trim(),
+        clauseReference: sections?.[0]?.heading,
+        pageReference: verifiedLoc?.page ? `Page ${verifiedLoc.page}` : undefined,
+        evidenceSnippet: verifiedLoc?.quote || matchedSentence.trim(),
+        evidenceStrength: 'Strong evidence',
+        isNotFound: false,
+        sourceLocation: verifiedLoc || undefined,
+      };
+    }
+
+    return {
+      documentId: params.documentId,
       answer: "I couldn't find that information in the uploaded document.",
       isNotFound: true,
       evidenceStrength: 'Limited evidence',

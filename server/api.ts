@@ -1,6 +1,16 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { analyzeDocumentServer, answerDocumentQuestionServer } from './geminiService';
-import { AnalyzeDocumentRequestSchema, AskDocumentRequestSchema } from '../src/types/schemas';
+import {
+  analyzeDocumentServer,
+  analyzeChunkServer,
+  finalizeAnalysisServer,
+  answerDocumentQuestionServer,
+} from './geminiService';
+import {
+  AnalyzeDocumentRequestSchema,
+  AnalyzeChunkRequestSchema,
+  FinalizeAnalysisRequestSchema,
+  AskDocumentRequestSchema,
+} from '../src/types/schemas';
 import type { ApiErrorResponse, HealthResponse, ReadyResponse } from '../src/types/api';
 import { createRateLimiter } from './middleware/security';
 
@@ -107,6 +117,78 @@ async function handleAnalyzeDocument(req: Request, res: Response, next: NextFunc
 /**
  * Ask Document handler (v1 and legacy alias)
  */
+/**
+ * Analyze Document Chunk handler (for large documents chunked client-side)
+ */
+async function handleAnalyzeChunk(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parseResult = AnalyzeChunkRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      const issue = parseResult.error.issues[0]?.message || 'Invalid document chunk payload.';
+      const errResponse: ApiErrorResponse = {
+        error: {
+          code: 'INVALID_CHUNK',
+          message: issue,
+        },
+        requestId: req.id || 'unknown',
+      };
+      res.status(400).json(errResponse);
+      return;
+    }
+
+    const result = await analyzeChunkServer(parseResult.data);
+    res.json(result);
+  } catch (err: any) {
+    console.error('API chunk analysis error [reqId=%s]:', req.id, err?.message);
+    const errResponse: ApiErrorResponse = {
+      error: {
+        code: 'CHUNK_ANALYSIS_FAILED',
+        message: 'This document section could not be analyzed safely. Please try again.',
+      },
+      requestId: req.id || 'unknown',
+    };
+    res.status(500).json(errResponse);
+  }
+}
+
+/**
+ * Finalize Document Analysis handler (merges chunk findings and calculates deterministic score)
+ */
+async function handleFinalizeAnalysis(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parseResult = FinalizeAnalysisRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      const issue = parseResult.error.issues[0]?.message || 'Invalid finalization payload.';
+      const errResponse: ApiErrorResponse = {
+        error: {
+          code: 'INVALID_FINALIZATION',
+          message: issue,
+        },
+        requestId: req.id || 'unknown',
+      };
+      res.status(400).json(errResponse);
+      return;
+    }
+
+    const result = await finalizeAnalysisServer(parseResult.data);
+    res.json(result);
+  } catch (err: any) {
+    console.error('API finalize analysis error [reqId=%s]:', req.id, err?.message);
+    const errResponse: ApiErrorResponse = {
+      error: {
+        code: 'FINALIZATION_FAILED',
+        message: 'Failed to compile final document analysis. Please try again.',
+      },
+      requestId: req.id || 'unknown',
+    };
+    res.status(500).json(errResponse);
+  }
+}
+
+/**
+ * Ask Document handler (v1 and legacy alias)
+ * Fully supports stateless execution across Vercel instances via relevantSections.
+ */
 async function handleAskDocument(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parseResult = AskDocumentRequestSchema.safeParse(req.body);
@@ -123,14 +205,15 @@ async function handleAskDocument(req: Request, res: Response, next: NextFunction
       return;
     }
 
-    const { documentId, question, rawText, documentType, clauses } = parseResult.data;
+    const { documentId, question, relevantSections, rawText, documentType, clauses } = parseResult.data;
 
-    // Guard: Must provide either a valid documentId or rawText
-    if (!documentId && (!rawText || !rawText.trim())) {
+    // Guard: Must provide either a valid documentId, relevantSections, or rawText
+    const hasSections = Array.isArray(relevantSections) && relevantSections.length > 0;
+    if (!documentId && !hasSections && (!rawText || !rawText.trim())) {
       const errResponse: ApiErrorResponse = {
         error: {
           code: 'MISSING_DOCUMENT_CONTEXT',
-          message: 'Either a valid documentId or document context is required to answer questions.',
+          message: 'Either a valid documentId, relevant document sections, or text context is required to answer questions.',
         },
         requestId: req.id || 'unknown',
       };
@@ -141,6 +224,7 @@ async function handleAskDocument(req: Request, res: Response, next: NextFunction
     const result = await answerDocumentQuestionServer({
       documentId,
       question,
+      relevantSections,
       rawText,
       documentType,
       clauses,
@@ -162,6 +246,8 @@ async function handleAskDocument(req: Request, res: Response, next: NextFunction
 
 // Primary v1 routes
 apiRouter.post('/v1/analyze-document', analyzeLimiter, handleAnalyzeDocument);
+apiRouter.post('/v1/analyze-chunk', analyzeLimiter, handleAnalyzeChunk);
+apiRouter.post('/v1/finalize-analysis', analyzeLimiter, handleFinalizeAnalysis);
 apiRouter.post('/v1/ask-document', qaLimiter, handleAskDocument);
 
 // Backward-compatible legacy aliases

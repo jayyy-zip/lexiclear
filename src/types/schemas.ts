@@ -26,6 +26,16 @@ export const DocumentCoverageSchema = z.object({
 });
 export type DocumentCoverage = z.infer<typeof DocumentCoverageSchema>;
 
+export const DocumentSectionRefSchema = z.object({
+  id: z.string(),
+  heading: z.string().optional(),
+  page: z.union([z.number(), z.string()]).optional(),
+  text: z.string(),
+  startOffset: z.number(),
+  endOffset: z.number(),
+});
+export type DocumentSectionRef = z.infer<typeof DocumentSectionRefSchema>;
+
 export const DocumentMetadataSchema = z.object({
   id: z.string(),
   fileName: z.string(),
@@ -34,8 +44,9 @@ export const DocumentMetadataSchema = z.object({
   uploadDate: z.string(),
   wordCount: z.number(),
   pageCount: z.union([z.number(), z.string()]).optional(),
-  rawText: z.string(),
+  rawText: z.string().optional(),
   coverage: DocumentCoverageSchema.optional(),
+  sections: z.array(DocumentSectionRefSchema).optional(),
 });
 export type DocumentMetadata = z.infer<typeof DocumentMetadataSchema>;
 
@@ -160,6 +171,7 @@ export const AnalysisResultSchema = z.object({
   timeline: z.array(TimelineEventSchema).default([]),
   lawyerPrepKit: LawyerPrepKitSchema,
   coverage: DocumentCoverageSchema.optional(),
+  sections: z.array(DocumentSectionRefSchema).optional(),
 });
 export type AnalysisResult = z.infer<typeof AnalysisResultSchema>;
 
@@ -282,9 +294,63 @@ export type AnalyzeDocumentRequest = z.infer<typeof AnalyzeDocumentRequestSchema
 export const AskDocumentRequestSchema = z.object({
   documentId: z.string().optional(),
   question: z.string().min(1, 'Question must not be empty').max(1000, 'Question too long'),
+  relevantSections: z.array(DocumentSectionRefSchema).optional(),
   // Optional rawText / clauses fallback for direct / legacy callers
   rawText: z.string().optional(),
   documentType: z.string().optional(),
   clauses: z.array(z.any()).optional(),
 });
 export type AskDocumentRequest = z.infer<typeof AskDocumentRequestSchema>;
+
+export const AnalyzeChunkRequestSchema = z.object({
+  documentId: z.string(),
+  chunkIndex: z.number(),
+  totalChunks: z.number(),
+  fileName: z.string().default('Document_Chunk'),
+  fileType: z.enum(['pdf', 'docx', 'txt']).default('txt'),
+  sections: z.array(DocumentSectionRefSchema),
+  chunkText: z.string().max(1_500_000, 'Chunk exceeds 1.5MB request limit'),
+});
+export type AnalyzeChunkRequest = z.infer<typeof AnalyzeChunkRequestSchema>;
+
+export const AnalyzeChunkResponseSchema = z.object({
+  chunkIndex: z.number(),
+  totalChunks: z.number(),
+  clauses: z.array(ClauseSchema),
+  risks: z.array(SilentRiskSchema),
+  healthDimensions: z.record(z.object({ score: z.number(), keyFinding: z.string() })).optional(),
+  summary: z.string().optional(),
+  parties: z.array(z.string()).optional(),
+  importantDates: z.array(z.string()).optional(),
+  financialTerms: z.array(z.string()).optional(),
+  obligations: z.array(z.string()).optional(),
+  terminationTerms: z.array(z.string()).optional(),
+  disputeResolution: z.string().optional(),
+  documentType: z.string().optional(),
+});
+export type AnalyzeChunkResponse = z.infer<typeof AnalyzeChunkResponseSchema>;
+
+export const FinalizeAnalysisRequestSchema = z.object({
+  documentId: z.string(),
+  fileName: z.string().default('Uploaded_Document'),
+  fileType: z.enum(['pdf', 'docx', 'txt']).default('txt'),
+  fileSize: z.number().optional(),
+  wordCount: z.number().optional(),
+  pageCount: z.union([z.number(), z.string()]).optional(),
+  sectionsTotal: z.number(),
+  sectionsAnalyzed: z.number(),
+  chunkSummaries: z.array(z.string()).default([]),
+  clauses: z.array(ClauseSchema).default([]),
+  risks: z.array(SilentRiskSchema).default([]),
+  healthDimensions: z.record(z.object({ score: z.number(), keyFinding: z.string() })).optional(),
+  documentType: z.string().optional(),
+  parties: z.array(z.string()).optional(),
+  jurisdiction: z.string().optional(),
+  importantDates: z.array(z.string()).optional(),
+  financialTerms: z.array(z.string()).optional(),
+  obligations: z.array(z.string()).optional(),
+  terminationTerms: z.array(z.string()).optional(),
+  disputeResolution: z.string().optional(),
+});
+export type FinalizeAnalysisRequest = z.infer<typeof FinalizeAnalysisRequestSchema>;
+

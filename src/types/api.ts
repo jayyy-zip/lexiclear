@@ -1,4 +1,13 @@
-import type { AnalysisResult, DocumentQAResponse, AnalyzeDocumentRequest, AskDocumentRequest } from './schemas';
+import type {
+  AnalysisResult,
+  DocumentQAResponse,
+  AnalyzeDocumentRequest,
+  AskDocumentRequest,
+  AnalyzeChunkRequest,
+  AnalyzeChunkResponse,
+  FinalizeAnalysisRequest,
+  DocumentSectionRef,
+} from './schemas';
 
 export interface ApiErrorDetail {
   code: string;
@@ -32,4 +41,12 @@ export type AskDocumentApiResponse = DocumentQAResponse & {
   documentId?: string;
 };
 
-export type { AnalyzeDocumentRequest, AskDocumentRequest };
+export type {
+  AnalyzeDocumentRequest,
+  AskDocumentRequest,
+  AnalyzeChunkRequest,
+  AnalyzeChunkResponse,
+  FinalizeAnalysisRequest,
+  DocumentSectionRef,
+};
+

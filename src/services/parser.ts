@@ -55,8 +55,17 @@ export function validateFile(file: File): ValidationResult {
     };
   }
 
-  const nameParts = file.name.split('.');
-  const ext = nameParts.length > 1 ? nameParts.pop()?.toLowerCase() : '';
+  const rawName = file.name || '';
+  const nameParts = rawName.split('.');
+  let ext = nameParts.length > 1 ? nameParts.pop()?.toLowerCase()?.trim() : '';
+
+  // Safe fallback to MIME type if extension is missing on mobile pickers
+  if (!ext && file.type) {
+    const mime = file.type.toLowerCase();
+    if (mime.includes('pdf')) ext = 'pdf';
+    else if (mime.includes('wordprocessingml') || mime.includes('docx') || mime.includes('msword')) ext = 'docx';
+    else if (mime.includes('text/plain')) ext = 'txt';
+  }
 
   if (!ext || !ALLOWED_EXTENSIONS.includes(ext)) {
     return {
@@ -376,8 +385,16 @@ export async function extractDocumentText(file: File): Promise<ExtractedDocument
     throw new Error(validation.error);
   }
 
-  const nameParts = file.name.split('.');
-  const ext = (nameParts.pop() || '').toLowerCase() as 'pdf' | 'docx' | 'txt';
+  const rawName = file.name || 'document';
+  const nameParts = rawName.split('.');
+  let ext = (nameParts.length > 1 ? nameParts.pop() : '')?.toLowerCase()?.trim() as 'pdf' | 'docx' | 'txt';
+
+  if (!ext && file.type) {
+    const mime = file.type.toLowerCase();
+    if (mime.includes('pdf')) ext = 'pdf';
+    else if (mime.includes('wordprocessingml') || mime.includes('docx') || mime.includes('msword')) ext = 'docx';
+    else if (mime.includes('text/plain')) ext = 'txt';
+  }
 
   let rawContent = '';
   let pageCount: number | string = 1;

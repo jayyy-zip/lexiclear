@@ -1,201 +1,253 @@
-# LexiClear
+# LexiClear — The Legal Document Co-Pilot
 
-> A GenAI legal document co-pilot that helps individuals and teams understand complex contracts, spot silent risks, ask grounded questions, and prepare practical next steps for legal consultation.
+> An AI-powered legal document co-pilot that helps individuals and teams understand complex contracts, spot silent risks, ask grounded questions, and prepare practical next steps for legal consultation.
+
+[![Node.js](https://img.shields.io/badge/Node.js-22.x-green.svg)](https://nodejs.org/)
+[![Vite](https://img.shields.io/badge/Vite-8.x-646CFF.svg)](https://vitejs.dev/)
+[![React](https://img.shields.io/badge/React-19.x-61DAFB.svg)](https://react.dev/)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new)
 
 ---
 
-## Problem
+## Overview
 
-Standard commercial and consumer contracts—from apartment leases and employment agreements to service notes and vendor terms—are dense, asymmetrical, and difficult for non-lawyers to evaluate. Traditional legal reviews are slow and expensive, while generic AI chatbots frequently hallucinate legal citations, fabricate clause numbers, and fail to provide exact quotes from the uploaded contract text.
+Standard commercial and consumer contracts—from residential leases and executive employment agreements to service notes and vendor terms—are dense, asymmetrical, and difficult for non-lawyers to evaluate. Generic AI chatbots frequently hallucinate legal citations, fabricate clause numbers, and fail to provide exact quotes from the uploaded contract text.
 
-## Solution
-
-LexiClear acts as an informational document co-pilot. It combines local document extraction, structured GenAI analysis via Google Gemini, strict substring and token offset verification, and deterministic rule-based scoring to deliver:
-1. Transparent, reproducible document screening.
-2. Verified clause citations linked directly to verbatim contract text.
-3. Strict anti-hallucination Q&A that refuses to speculate when information is absent.
-4. Actionable preparation kits for reviewing with qualified legal counsel.
+**LexiClear** solves this by combining client-side document extraction, structured GenAI analysis via Google Gemini, strict substring and token offset verification, and deterministic rule-based scoring to deliver:
+1. **Transparent, reproducible document screening** without hidden algorithmic bias.
+2. **Verified clause citations** linked directly to verbatim contract text with start/end character offsets.
+3. **Strict anti-hallucination Q&A** that refuses to speculate when information is absent.
+4. **Actionable preparation kits** designed for reviewing with licensed legal counsel.
+5. **Vercel-native serverless architecture** that is fast, resilient, and respects platform payload limits.
 
 ---
 
 ## Core Features
 
-- **Document Extraction & Normalization**: Native browser/server parsing for PDF, DOCX, and TXT files, preserving headings, page boundaries, and section offsets without fabricating page numbers.
+- **Document Extraction & Normalization**: Native browser-first parsing for PDF, DOCX, and TXT files, preserving headings, page boundaries, and section offsets.
+- **Safari-Hardened PDF Parsing**: Uses `streamTextContent().getReader().read()` and a matched local worker (`/pdf.worker.min.mjs`) for robust compatibility across iOS Safari, macOS Safari, Chrome, Edge, and Firefox.
 - **Legal Health Screen**: An informational screening index across 6 core weighted dimensions: Risk Exposure (25%), Fairness (20%), Obligation Balance (15%), Termination Rights (15%), Clarity (15%), and Dispute Resolution (10%).
 - **Silent Risk Radar**: Spotlights unilateral indemnities, automatic renewals, penalty clauses, and liabilities with quoted evidence.
 - **Clause X-Ray**: Side-by-side view with plain-English translation, practical impact ("Why It Matters"), questions to consider, and exact source offsets.
 - **Ask the Document**: Grounded Q&A assistant powered by server-side Gemini. Returns verbatim quoted evidence and explicit source locations, or returns *"I couldn't find that information in the uploaded document."* when topics are not covered.
+- **Stateless Serverless Fallback**: Sends ranked document section context with queries so Q&A never breaks when serverless function instances scale or recycle.
 - **Action Checklist**: Categorized action items (negotiate, clarify, prepare, verify, deadline) with interactive completion tracking.
 - **Timeline & Calendar Export**: Chronological extraction of critical deadlines with one-click `.ics` calendar file generation.
 - **Lawyer Prep Kit**: Structured consultation summary highlighting top concerns, financial exposure, and targeted questions to bring to a licensed attorney.
-- **Deterministic Demo Mode**: Interactive offline sample agreements (Residential Lease, Executive Employment, Commercial Note) enabling instant evaluation without requiring live API keys.
+- **Deterministic Offline Demo**: Interactive sample agreements (Residential Lease, Executive Employment, Commercial Note) enabling instant evaluation without requiring live API keys.
 
 ---
 
-## Architecture
+## Target Deployment Architecture
+
+LexiClear is structured for **single-deployment hosting on Vercel** (or local Node development) combining static Vite assets and Vercel Node Serverless Functions.
 
 ```text
-                    ┌─────────────────────────┐
-                    │  React 19 + Vite UI     │
-                    └────────────┬────────────┘
-                                 │ Typed API Client
-                                 │ (Zero Gemini SDK/Keys in bundle)
-                    ┌────────────▼────────────┐
-                    │    Express API Server   │
-                    │  /api/v1/*              │
-                    │  rate limiting          │
-                    │  request IDs            │
-                    │  security headers       │
-                    │  Zod validation         │
-                    └────────────┬────────────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              │                  │                  │
-        Document Store    Gemini Service     Grounding Verifier
-        (Ephemeral TTL)          │           (Offsets & Sections)
-                                 │                  │
-                         Structured JSON            │
-                                 │                  │
-              └──────────────────┼──────────────────┘
-                                 │
-                     Deterministic Risk Engine
-                     (Local algorithmic scoring)
-                                 │
-                     Validated Result Envelope
-                                 │
-                    ┌────────────▼────────────┐
-                    │  React State Store      │
-                    │  (Finite Status FSM)    │
-                    └─────────────────────────┘
+                                  VERCEL
+                                    │
+               ┌────────────────────┴────────────────────┐
+               │                                         │
+          React 19 / Vite                          Vercel Functions
+           Static Assets                          Node 22 / Express
+           (dist/ folder)                            (api/index.ts)
+               │                                         │
+               │ /pdf.worker.min.mjs                     │ /api/v1/*
+               │                                         │
+               └────────────────────┬────────────────────┘
+                                    │
+                              Google Gemini
+                            (GEMINI_API_KEY)
 ```
 
-### Critical Security Boundaries
-- **Server-Side AI Isolation**: The Gemini SDK and `GEMINI_API_KEY` reside exclusively on the server. The client bundle contains zero references to the AI API key.
-- **Untrusted Document Defense**: Document contents are treated strictly as untrusted passive data wrapped in boundary tags (`<DOCUMENT_CONTENT>`). System instructions explicitly instruct the model to ignore any embedded prompt injection attempts or adversarial commands.
-- **Ephemeral Document Lifecycle**: Documents are stored in bounded, in-memory cache with TTL and automatic eviction. The application does not use a persistent database or third-party storage.
+### Architectural Highlights
+
+1. **Unified Application Architecture**:
+   - `server/app.ts`: Defines the Express application, security headers, rate limiting, and API routes.
+   - `server.ts`: Local server entrypoint that mounts `app.listen()` for `npm start`.
+   - `api/index.ts`: Production Vercel Serverless Function entrypoint exporting `app` with `maxDuration: 60`.
+2. **Payload Protection (< 4.5 MB Vercel Limit)**:
+   - Raw documents are parsed locally in the browser into structured sections.
+   - Large documents are chunked into safe batches (<= 40,000 characters) and sent via `POST /api/v1/analyze-chunk`.
+   - The final analysis is assembled and scored deterministically via `POST /api/v1/finalize-analysis`.
+   - Standard requests remain well under 1.5–2 MB.
+3. **Response Payload Protection**:
+   - The backend never mirrors the entire original raw document text back to the client. Responses contain only structured metadata, clauses, risks, scores, and evidence coordinates.
+4. **Stateless Serverless Q&A**:
+   - Vercel serverless function instances are ephemeral and do not share in-memory state.
+   - The browser ranks and selects the most relevant sections locally (`relevantSections`, <= 25 KB) and provides them with the query to `POST /api/v1/ask-document`.
+   - The backend grounds its answer against the provided context, guaranteeing reliable Q&A even on cold starts or across separate function instances.
+5. **Ephemeral Security Model**:
+   - Zero database, Redis, or permanent disk storage dependencies.
+   - Active document content resides only in React memory during the user's session.
+   - The browser bundle contains **zero** Google GenAI SDK imports or API key references.
 
 ---
 
-## AI Safety & Grounding Protocol
+## Vercel Deployment Guide
 
-1. **Exact & Normalized Verification**: Every citation and evidence snippet returned by AI is verified against the source text using deterministic substring and whitespace alignment. Loose 70% fuzzy matching is strictly rejected.
-2. **Source Location Mapping**: Verified quotes return precise character offsets (`startOffset`, `endOffset`), `sectionId`, and `page` references.
-3. **Absence Fallback**: For document queries concerning unmentioned subjects, the system returns:
-   > *"I couldn't find that information in the uploaded document."*
-4. **Local Deterministic Scoring**: AI spots potential clauses and evidence; local deterministic code normalizes severity, deduplicates findings, applies algorithmic downward pressure, and computes the composite score.
+Deploying LexiClear to Vercel takes less than 3 minutes.
+
+### Step-by-Step Instructions
+
+1. **Fork or Push** the repository to GitHub:
+   ```bash
+   git push origin main
+   ```
+2. **Import Project into Vercel**:
+   - Log in to your [Vercel Dashboard](https://vercel.com).
+   - Click **Add New** → **Project**.
+   - Select your `lexiclear` repository and click **Import**.
+3. **Configure Build & Settings**:
+   - **Framework Preset**: `Vite` (automatically detected).
+   - **Root Directory**: `./` (default).
+   - **Node.js Version**: Ensure Node `22.x` is selected in *Project Settings → General → Node.js Version* (enforced by `"engines": { "node": "22.x" }` in `package.json`).
+4. **Configure Environment Variables**:
+   In the **Environment Variables** section, add:
+   | Variable | Value | Description |
+   | :--- | :--- | :--- |
+   | `GEMINI_API_KEY` | `AIzaSy...` | **Required**. Your Google Gemini API key from [Google AI Studio](https://aistudio.google.com/). |
+   | `GEMINI_MODEL` | `gemini-3.8-flash` | *Optional*. Configured Gemini model (defaults to `gemini-3.8-flash`). |
+5. **Deploy**:
+   - Click **Deploy**. Vercel will build the Vite frontend to `dist/` and compile the serverless function in `api/index.ts`.
+6. **Verify Deployment**:
+   - Open your deployed URL:
+     - Health Check: `https://<your-project>.vercel.app/api/health` → `{"status":"ok","service":"lexiclear-api","version":"1.0.0"}`
+     - Readiness Check: `https://<your-project>.vercel.app/api/ready` → `{"ready":true,"service":"lexiclear-api"}`
+     - PDF Worker: `https://<your-project>.vercel.app/pdf.worker.min.mjs` → Returns the worker script with HTTP 200.
 
 ---
 
-## Tech Stack
+## Environment Variables
 
-- **Frontend**: React 19, TypeScript, Tailwind CSS, Lucide React, Motion
-- **Document Parsing**: pdfjs-dist, Mammoth, custom text normalizer
-- **Backend**: Express 4, tsx, Node.js (v20+)
-- **AI Integration**: `@google/genai` (Google GenAI SDK), Gemini 3.8 Flash (configurable via `GEMINI_MODEL`)
-- **Validation**: Zod (runtime type and schema validation)
-- **Testing**: Custom automated test suite covering parser, risk engine, grounding verifier, and Express API integration
+| Variable | Scope | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `GEMINI_API_KEY` | Server-only | **Yes** (for live AI) | `""` | Google GenAI API key for document analysis & Q&A. |
+| `GEMINI_MODEL` | Server-only | No | `gemini-3.8-flash` | Gemini model used for analysis and Q&A. |
+| `PORT` | Server-only | No (Local dev) | `3000` | Port for local Express standalone server. Ignored by Vercel. |
+| `NODE_ENV` | Server-only | No | `production` | Environment mode (`development`, `production`, `test`). |
+| `RATE_LIMIT_WINDOW_MS` | Server-only | No | `60000` | In-memory IP rate limiter window (ms). |
+| `RATE_LIMIT_MAX_ANALYZE` | Server-only | No | `20` | Max analysis requests per IP per window. |
+| `RATE_LIMIT_MAX_QA` | Server-only | No | `60` | Max Q&A requests per IP per window. |
 
----
-
-## Project Structure
-
-```text
-lexiclear/
-├── dist/                         # Static production build output
-├── server/
-│   ├── api.ts                   # Versioned Express routes (/api/v1/*)
-│   ├── geminiService.ts         # Server-side Gemini service & Zod validation
-│   ├── documentStore.ts         # In-memory ephemeral document store (TTL)
-│   ├── documentChunker.ts       # Section segmentation & coverage metrics
-│   ├── groundingVerifier.ts     # Deterministic quote verification & offsets
-│   ├── middleware/
-│   │   └── security.ts          # Request IDs, rate limiter, security headers
-│   └── prompts/
-│       ├── analysisPrompt.ts    # Prompt injection defense & analysis instructions
-│       └── qaPrompt.ts          # Grounded Q&A prompt template
-├── src/
-│   ├── components/              # UI components (Overview, X-Ray, Chat, etc.)
-│   ├── data/
-│   │   └── sampleDocuments.ts   # Deterministic demo contracts
-│   ├── services/
-│   │   ├── apiClient.ts         # Typed frontend HTTP client
-│   │   ├── documentContext.ts   # Finite state management & store
-│   │   ├── parser.ts            # Local file parsing & normalization
-│   │   ├── riskEngine.ts        # Deterministic scoring & deduplication
-│   │   └── gemini.ts            # Client facade delegating to apiClient
-│   ├── types/
-│   │   ├── api.ts               # API response and envelope types
-│   │   ├── document.ts          # Document domain interfaces
-│   │   └── schemas.ts           # Shared Zod schemas & inferred types
-│   ├── utils/
-│   │   └── icsExporter.ts       # Calendar export generator
-│   ├── App.tsx                  # Main layout & navigation
-│   └── main.tsx                 # React entry point
-├── tests/
-│   └── runTests.ts              # Unit and API integration test suite
-├── package.json
-├── server.ts                    # Production Express entry point
-├── tsconfig.json
-└── vite.config.ts
-```
+> **Security Guarantee**: Never set `VITE_GEMINI_API_KEY` or expose AI secrets to Vite. The frontend bundle in `dist/` is audited to ensure zero occurrences of `GEMINI_API_KEY` or `@google/genai`.
 
 ---
 
 ## Local Development
 
 ### Prerequisites
-- Node.js (v20 or newer recommended)
-- npm (v9 or newer)
+- **Node.js**: `22.x` (recommended) or higher
+- **npm**: `v9` or newer
 
-### Installation
-```bash
-git clone <repository-url>
-cd lexiclear
-npm install
-```
+### Setup
 
-### Environment Configuration
-Copy the example configuration:
-```bash
-cp .env.example .env
-```
-Set your Google Gemini API key:
-```env
-GEMINI_API_KEY="your_api_key_here"
-PORT=3000
-GEMINI_MODEL="gemini-3.8-flash"
-```
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/jayyy-zip/lexiclear.git
+   cd lexiclear
+   ```
+2. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+3. **Configure environment variables**:
+   ```bash
+   cp .env.example .env
+   ```
+   Edit `.env` and set your `GEMINI_API_KEY`:
+   ```env
+   GEMINI_API_KEY="your_api_key_here"
+   GEMINI_MODEL="gemini-3.8-flash"
+   PORT=3000
+   ```
+4. **Start local development server**:
+   ```bash
+   npm run dev
+   ```
+   Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### Start Development Server
-```bash
-npm run dev
-```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+5. **Run with Vercel CLI (Local Serverless Emulation)**:
+   If you have the Vercel CLI installed:
+   ```bash
+   npx vercel dev
+   ```
+   This emulates the exact Vercel Serverless Function routing and static file handling locally.
+
+6. **Start local production server**:
+   ```bash
+   npm run build
+   npm start
+   ```
 
 ---
 
-## Environment Variables
+## Testing & Quality Assurance
 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `PORT` | Port for the Express server | `3000` |
-| `NODE_ENV` | Environment mode (`development`, `production`, `test`) | `production` |
-| `GEMINI_API_KEY` | Google GenAI API key for live analysis | `""` |
-| `GEMINI_MODEL` | Gemini model name | `gemini-3.8-flash` |
-| `RATE_LIMIT_WINDOW_MS` | Rate limiting sliding window in milliseconds | `60000` (1 min) |
-| `RATE_LIMIT_MAX_ANALYZE` | Max analyze requests per window per IP | `20` |
-| `RATE_LIMIT_MAX_QA` | Max Q&A requests per window per IP | `60` |
+Run the comprehensive automated test suite (210+ assertions covering parsers, chunkers, deterministic risk engine, grounding verification, and serverless API integration):
+
+```bash
+npm test
+```
+
+Run TypeScript strict type checking:
+```bash
+npm run lint
+```
+
+Build the production client:
+```bash
+npm run build
+```
 
 ---
 
-## Backend API
+## Browser & Cross-Device Compatibility
 
-All endpoints require JSON payloads and return structured responses with an `X-Request-ID` header.
+LexiClear is tested and hardened across modern desktop and mobile browsers:
 
-### Endpoints
+| Platform | Browser | Status | Notes |
+| :--- | :--- | :--- | :--- |
+| **macOS / iOS** | Safari | **Supported** | Hardened `streamTextContent().getReader().read()` PDF extraction; handles missing `Symbol.asyncIterator`. |
+| **macOS / Windows / Linux** | Google Chrome | **Supported** | Native ReadableStream and full PDF worker acceleration. |
+| **macOS / Windows / Linux** | Mozilla Firefox | **Supported** | Full compatibility with Web Workers and dynamic imports. |
+| **macOS / Windows** | Microsoft Edge | **Supported** | Chromium-parity compatibility. |
+| **iOS** | Mobile Safari | **Supported** | Viewport safety via `100dvh`, iOS safe-area insets (`--sat`, `--sab`), non-clipping keyboard layout. |
+| **Android** | Android Chrome | **Supported** | Fallback MIME type handling for Android file picker; touch targets >= 44px. |
 
-#### `GET /api/health`
-Returns service health status without leaking secrets.
+### Responsive Design
+- **Supported Widths**: 320px (iPhone SE) to 4K desktop (3840px).
+- **Safe Viewports**: Employs `100dvh` to prevent mobile address bar jumping and clipping.
+- **Mobile File Chooser**: Robust extension-based validation handles empty or irregular MIME types from iOS Files and Android storage providers.
+
+---
+
+## PDF Extraction Architecture
+
+LexiClear avoids brittle external PDF services by running PDF parsing directly in the browser using `pdfjs-dist`:
+
+1. **Safari Stream Reader Fix**:
+   Safari does not natively support `Symbol.asyncIterator` on `ReadableStreamDefaultReader`. Instead of `for await (... of stream)` or the deprecated `page.getTextContent()`, LexiClear implements an explicit loop:
+   ```ts
+   const reader = stream.getReader();
+   while (true) {
+     const { done, value } = await reader.read();
+     if (done) break;
+     // aggregate text items
+   }
+   ```
+2. **Local Worker Parity**:
+   The worker script at `public/pdf.worker.min.mjs` is an exact match for the installed `pdfjs-dist@6.3.289` package. This eliminates CDN network dependencies and avoids version-mismatch exceptions.
+3. **Friendly Error Classification**:
+   Scanned PDFs without selectable text, password-encrypted files, and corrupted binaries are intercepted with helpful guidance rather than raw JavaScript exceptions.
+
+---
+
+## Backend API Reference
+
+All endpoints accept JSON payloads and include security headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `X-Request-ID`).
+
+### `GET /api/health`
+Health check endpoint. Never exposes API keys or internal environment secrets.
 ```json
 {
   "status": "ok",
@@ -204,7 +256,7 @@ Returns service health status without leaking secrets.
 }
 ```
 
-#### `GET /api/ready`
+### `GET /api/ready`
 Readiness probe for deployment orchestrators.
 ```json
 {
@@ -213,83 +265,78 @@ Readiness probe for deployment orchestrators.
 }
 ```
 
-#### `POST /api/v1/analyze-document`
-Analyzes document text, detects clauses and silent risks, verifies grounding, and computes the Legal Health Score.
-- **Request Body**:
-  ```json
-  {
-    "rawText": "Full text of the legal contract...",
-    "fileName": "Contract.pdf",
-    "fileType": "pdf",
-    "wordCount": 1200,
-    "pageCount": 4
-  }
-  ```
-- **Response**: Full `AnalysisResult` object with `documentId`.
-
-#### `POST /api/v1/ask-document`
-Answers questions strictly grounded in the document context.
-- **Request Body**:
+### `POST /api/v1/analyze-chunk`
+Analyzes an individual section chunk of a large contract (<= 40,000 chars) to stay safely below Vercel payload limits.
+- **Request**:
   ```json
   {
     "documentId": "doc-1726743900000-xyz",
-    "question": "What is the penalty for late rent?"
+    "chunkIndex": 0,
+    "totalChunks": 2,
+    "chunkText": "1. TERM AND RENEWAL...",
+    "sections": [{ "id": "sec-1", "heading": "1. Term", "text": "...", "page": 1, "startOffset": 0, "endOffset": 250 }]
+  }
+  ```
+- **Response**: Compact structured clauses and silent risks detected in this chunk.
+
+### `POST /api/v1/finalize-analysis`
+Merges findings from all chunks, applies deduplication, computes the deterministic Legal Health Score, and builds the Lawyer Prep Kit.
+- **Request**: Aggregated clauses, risks, summaries, and document metadata.
+- **Response**: Full `AnalysisResult` envelope with coverage metrics (`coverageComplete`, `sectionsAnalyzed`, `sectionsTotal`).
+
+### `POST /api/v1/ask-document`
+Answers questions strictly grounded in the document context. Supports stateless fallback via `relevantSections`.
+- **Request**:
+  ```json
+  {
+    "documentId": "doc-1726743900000-xyz",
+    "question": "What is the security deposit refund policy?",
+    "relevantSections": [
+      {
+        "id": "sec-3",
+        "heading": "3. Security Deposit",
+        "text": "Deposit of $3,000 shall be returned within twenty-one (21) days of surrender...",
+        "page": 2,
+        "startOffset": 1500,
+        "endOffset": 1750
+      }
+    ]
   }
   ```
 - **Response**:
   ```json
   {
-    "answer": "If rent is not received by the third day, a late fee of $250 is assessed...",
-    "clauseReference": "Clause 2: Rent & Late Fees",
-    "pageReference": "Page 1",
-    "evidenceSnippet": "Tenant shall incur a late charge of $250.00...",
+    "answer": "The security deposit of $3,000 must be returned within 21 days following property surrender.",
+    "clauseReference": "Clause 3: Security Deposit",
+    "pageReference": "Page 2",
+    "evidenceSnippet": "Deposit of $3,000 shall be returned within twenty-one (21) days",
     "evidenceStrength": "Strong evidence",
     "isNotFound": false,
     "sourceLocation": {
-      "quote": "Tenant shall incur a late charge of $250.00...",
-      "startOffset": 1240,
-      "endOffset": 1285,
-      "page": 1
+      "quote": "Deposit of $3,000 shall be returned within twenty-one (21) days",
+      "startOffset": 1500,
+      "endOffset": 1563,
+      "page": 2
     }
   }
   ```
 
 ---
 
-## Testing
+## Privacy Model
 
-Run the full automated test suite (including unit tests for parser, chunker, risk engine, and Express API integration tests):
-```bash
-npm test
-```
-
-Run TypeScript static type checks:
-```bash
-npm run lint
-```
+- **No Persistent Document Storage**: Uploaded legal contracts are processed ephemerally in active memory. LexiClear has no database, no Redis cache, and no external object storage.
+- **No Browser Storage for Documents**: Contract text is never written to `localStorage` or `sessionStorage`. Closing or refreshing the tab clears all document content from memory.
+- **Untrusted Passive Data Boundary**: Document content is wrapped in strict structural delimiters (`<DOCUMENT_CONTENT>`) with system instructions forbidding the AI from executing embedded prompts or adversarial commands.
 
 ---
 
-## Deployment
+## Limitations
 
-LexiClear is designed to deploy as **a single full-stack Node service** (e.g. Google Cloud Run, Render, Railway, AWS App Runner).
-
-1. Build static production client:
-   ```bash
-   npm run build
-   ```
-2. Start the production Express server:
-   ```bash
-   npm start
-   ```
-
-The Express server binds to `0.0.0.0`, listens on `process.env.PORT`, serves `/api/v1/*` routes, and statically serves the compiled Vite assets from `dist/` with single-page application (SPA) wildcard fallback.
-
----
-
-## Privacy Notice
-
-Your uploaded contracts are processed ephemerally in active server memory for the duration of the analysis session. LexiClear does not intentionally persist uploaded documents to disk or databases after the session terminates.
+- **Scanned / Image-Only Documents**: LexiClear extracts selectable text. Scanned contracts without an OCR text layer cannot be parsed; users should OCR the document before upload.
+- **Session Duration**: Because documents are held ephemerally in React state, refreshing the browser requires re-uploading the file.
+- **Rate Limits**: Public deployments enforce sliding-window IP rate limits to mitigate abuse.
+- **Serverless Timeouts**: Analyses of extremely lengthy contracts (> 100 pages) should be processed through chunked analysis to prevent exceeding Vercel function timeout thresholds.
 
 ---
 
@@ -297,4 +344,4 @@ Your uploaded contracts are processed ephemerally in active server memory for th
 
 **LexiClear provides informational document analysis and issue spotting, not legal advice.**
 
-The findings, screening scores, and summaries generated by LexiClear are designed exclusively to highlight clauses and provisions that may deserve closer review. LexiClear does not provide formal legal opinions, establish an attorney-client relationship, or guarantee contractual enforceability. Always consult with a qualified attorney licensed in your jurisdiction for binding legal counsel.
+The findings, screening scores, silent risk detections, and summaries generated by LexiClear are designed exclusively to highlight contractual provisions that may deserve closer review. LexiClear does not provide formal legal opinions, establish an attorney-client relationship, or guarantee contractual enforceability or zero hallucinations. Always consult with a qualified attorney licensed in your jurisdiction for binding legal counsel.
